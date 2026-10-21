@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SKYLINE — wingsuit proximity flying</title>
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud" class="hidden"></div>
+<div id="toasts"></div>
+
+<div id="title" class="hidden">
+  <h1 class="brand">SKYLINE</h1>
+  <div class="tag">Wingsuit proximity flying</div>
+  <div class="menu">
+    <button data-act="tutorial"><span class="k">T</span>Learn to fly</button>
+    <button data-act="fly"><span class="k">↵</span>Fly</button>
+    <button data-act="race"><span class="k">R</span>Racing</button>
+    <button data-act="map"><span class="k">M</span>World map</button>
+    <button data-act="shop"><span class="k">B</span>Shop</button>
+    <button data-act="challenges"><span class="k">C</span>Challenges</button>
+    <button data-act="stats"><span class="k">X</span>Stats</button>
+    <button data-act="settings"><span class="k">S</span>Settings</button>
+  </div>
+  <div class="foot">Seed <span id="titleSeed">skyline</span> &nbsp;·&nbsp; 151 km² of handmade mountain</div>
+</div>
+
+<div id="loading">
+  <div class="inner">
+    <h1>SKYLINE</h1>
+    <div class="sub">building the range</div>
+    <div class="bar"><i id="loadBar"></i></div>
+    <div class="phase" id="loadPhase">starting</div>
+  </div>
+</div>
+
+<div id="overlayHost"></div>
+
+<script type="module">
+  import { boot } from './src/main.js';
+  boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Wingsuiter rig</title>
+<style>html,body{margin:0;height:100%;background:#0b0f14;overflow:hidden}
+#hud{position:fixed;left:8px;top:8px;color:#9fe;font:11px ui-monospace,monospace;white-space:pre}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three/three.module.js" } }</script>
+</head>
+<body><div id="hud"></div>
+<script type="module">
+import * as THREE from 'three';
+import { Sky, WEATHER } from '../src/render/sky.js';
+import { makeLitMaterial } from '../src/render/materials.js';
+import { Wingsuiter } from '../src/character/anim.js';
+
+const errors = [];
+window.addEventListener('error', e => errors.push(String(e.message)));
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.05, 200);
+const sky = new Sky(scene);
+sky.resize(200);
+sky.update(10.5, WEATHER.clear, new THREE.Vector3());
+sky.uniforms.uFogDensity.value = 0.00002;
+
+const bodyMat = makeLitMaterial(sky.uniforms, { specular: 0.22, shininess: 42, ambientBoost: 0.25 });
+const fabMat = makeLitMaterial(sky.uniforms, {
+  specular: 0.16, shininess: 26, translucency: 0.8, side: THREE.DoubleSide, ambientBoost: 0.3,
+});
+const suit = new Wingsuiter(bodyMat, fabMat);
+scene.add(suit.group);
+
+// ground grid for scale
+const grid = new THREE.GridHelper(8, 16, 0x335566, 0x223344);
+grid.position.y = -1.2;
+scene.add(grid);
+
+const state = {
+  tuck: 0, track: 0, flare: 0, bank: 0, alpha: 0.14, speed: 48, sep: 0,
+  inverted: 0, heli: 0, tumble: 0, knife: 0, grounded: 0, crouch: 0, canopy: 0,
+  trickSpin: 0, pressure: 0.55, tension: 0.4,
+};
+window.POSE = state;
+
+let t = 0;
+let camAngle = 0.9, camElev = 0.35, camDist = 3.4;
+function setView(a, e, d) { camAngle = a; camElev = e; camDist = d; }
+window.setView = setView;
+
+function frame(dt) {
+  t += dt;
+  suit.update(dt, state);
+  suit.group.updateMatrixWorld();
+  camera.position.set(
+    Math.cos(camAngle) * Math.cos(camElev) * camDist,
+    Math.sin(camElev) * camDist,
+    Math.sin(camAngle) * Math.cos(camElev) * camDist,
+  );
+  camera.lookAt(0, 0, 0.1);
+  sky.setCam(camera.position);
+  sky.uniforms.uCamPos.value.copy(camera.position);
+  renderer.render(scene, camera);
+  document.getElementById('hud').textContent =
+    `tuck ${state.tuck.toFixed(2)} track ${state.track.toFixed(2)} flare ${state.flare.toFixed(2)} bank ${state.bank.toFixed(2)}\nerr ${errors.length} ${errors[0] || ''}`;
+}
+
+window.RIG = {
+  frame(n = 1, dt = 1 / 60) { for (let i = 0; i < n; i++) frame(dt); return true; },
+  state, suit, errors,
+};
+// settle the springs
+for (let i = 0; i < 120; i++) frame(1 / 60);
+window.RIG_READY = true;
+(function loop(){ frame(1/60); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>

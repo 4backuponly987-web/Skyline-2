@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Volumetric features</title>
+<style>html,body{margin:0;height:100%;background:#05070a;overflow:hidden}
+#hud{position:fixed;left:8px;top:8px;color:#9fe;font:11px/1.5 ui-monospace,monospace;white-space:pre;text-shadow:0 1px 2px #000}
+#load{position:fixed;inset:0;display:grid;place-items:center;color:#cfd6dd;font:13px ui-monospace,monospace;background:#05070a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three/three.module.js" } }</script>
+</head>
+<body><div id="load">booting…</div><div id="hud"></div>
+<script type="module">
+import * as THREE from 'three';
+import { TerrainField, WORLD } from '../src/world/field.js';
+import { Sky, WEATHER } from '../src/render/sky.js';
+import { makeTerrainMaterial } from '../src/world/terrainMaterial.js';
+import { TerrainChunks } from '../src/world/chunks.js';
+import { FeatureSet, FEATURE_RANGE } from '../src/world/features.js';
+import { Collision } from '../src/world/collision.js';
+import { Rng } from '../src/core/rng.js';
+
+const errors = [];
+addEventListener('error', (e) => errors.push(String(e.message)));
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 20000);
+const sky = new Sky(scene);
+sky.resize(20000);
+const frustum = new THREE.Frustum();
+const pm = new THREE.Matrix4();
+const load = document.getElementById('load');
+const hud = document.getElementById('hud');
+
+const field = new TerrainField('skyline');
+let chunks, features, mat, collision;
+
+const gen = field.bake();
+function pump() {
+  const t = performance.now();
+  let r;
+  while (performance.now() - t < 80) { r = gen.next(); if (r.done || r.value.phase === 'done') break; }
+  if (!r.done && r.value.phase !== 'done') {
+    load.textContent = `${r.value.label} ${(r.value.progress * 100) | 0}%`;
+    return setTimeout(pump, 0);
+  }
+  buildWorld();
+}
+setTimeout(pump, 0);
+
+function buildWorld() {
+  mat = makeTerrainMaterial(field, sky.uniforms, { shadowSteps: 16, rockOctaves: 4 });
+  chunks = new TerrainChunks(field, mat, { splitK: 2.4, holeRange: FEATURE_RANGE });
+  scene.add(chunks.group);
+  collision = new Collision(field);
+  features = new FeatureSet(field, mat, new Rng(field.seed ^ 0xa17c), { cellSize: 3.2, maxCells: 88 });
+  const g = features.build();
+  const t0 = performance.now();
+  (function step() {
+    const t = performance.now();
+    let r;
+    while (performance.now() - t < 90) { r = g.next(); if (r.done) break; }
+    if (!r.done) { load.textContent = r.value.label; return setTimeout(step, 0); }
+    scene.add(features.group);
+    for (const h of features.holes) chunks.addHole(h.x0, h.z0, h.x1, h.z1);
+    chunks.holeMask = (x, z) => features.hidesQuad(x, z);
+    collision.features = features;
+    window.BUILD_MS = performance.now() - t0;
+    load.style.display = 'none';
+    window.FEAT_READY = true;
+    look(0);
+    frame();
+  })();
+}
+
+let idx = 0;
+let camAngle = 0.6, camElev = 0.18, camDist = 1;
+function look(i, angle, elev, distScale) {
+  idx = ((i % features.list.length) + features.list.length) % features.list.length;
+  const f = features.list[idx];
+  const b = f.bounds;
+  // frame on the feature itself, not on a bounding box that may contain a
+  // few hundred metres of hillside
+  const size = Math.max(b.x1 - b.x0, b.z1 - b.z0);
+  camAngle = angle === undefined ? camAngle : angle;
+  camElev = elev === undefined ? camElev : elev;
+  camDist = size * (distScale === undefined ? 1.15 : distScale);
+  camera.position.set(
+    f.x + Math.cos(camAngle) * Math.cos(camElev) * camDist,
+    f.y + Math.sin(camElev) * camDist + size * 0.12,
+    f.z + Math.sin(camAngle) * Math.cos(camElev) * camDist,
+  );
+  camera.lookAt(f.x, f.y, f.z);
+  camera.updateMatrixWorld();
+  pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(pm);
+  chunks.prime(camera.position, frustum);
+  return f.name;
+}
+
+function frame() {
+  sky.update(16.4, WEATHER.clear, camera.position);
+  sky.setCam(camera.position);
+  mat.uniforms.uTime.value = performance.now() * 0.001;
+  camera.updateMatrixWorld();
+  pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(pm);
+  chunks.update(camera.position, camera.position, frustum, 1e9, true);
+  features.updateVisibility(camera.position);
+  renderer.render(scene, camera);
+  const f = features.list[idx];
+  hud.textContent = `${idx}: ${f.name} (${f.kind})  ${Math.round(f.tris)} tris\n` +
+    `bounds ${Math.round(f.bounds.x1 - f.bounds.x0)} x ${Math.round(f.bounds.y1 - f.bounds.y0)} x ${Math.round(f.bounds.z1 - f.bounds.z0)} m\n` +
+    `features ${features.list.length}  total ${(features.stats().tris / 1000).toFixed(0)}k tris  build ${Math.round(window.BUILD_MS)} ms\n` +
+    `err ${errors.length} ${errors[0] || ''}`;
+}
+
+/** Marches a ray and reports where it first hits solid, for collision checks. */
+function probe(ox, oy, oz, dx, dy, dz, maxT) {
+  const out = {};
+  const t = collision.ray(ox, oy, oz, dx, dy, dz, maxT, out);
+  return t < 0 ? null : { t: +t.toFixed(2), p: [out.px, out.py, out.pz].map((v) => +v.toFixed(1)) };
+}
+
+window.FEAT = {
+  look(i, a, e, d) { const n = look(i, a, e, d); frame(); return n; },
+  orbit(a, e, d) { look(idx, a, e, d); frame(); return features.list[idx].name; },
+  frame() { frame(); return true; },
+  list: () => features.list.map((f, i) => [i, f.name, f.kind, Math.round(f.tris)]),
+  probe,
+  features: () => features,
+  collision: () => collision,
+  field,
+  errors,
+  /** Checks a feature's portal is actually open: shoots a ray along the axis. */
+  checkPortal(i) {
+    const f = features.list[i];
+    if (!f.portal) return 'no portal';
+    const p = f.portal;
+    const back = 220;
+    const o = { x: p.x - p.nx * back, y: p.y - p.ny * back, z: p.z - p.nz * back };
+    const hit = probe(o.x, o.y, o.z, p.nx, p.ny, p.nz, back * 2.2);
+    const inside = collision.clearance(p.x, p.y, p.z);
+    return { name: f.name, portalClearance: +inside.toFixed(2), rayHit: hit };
+  },
+};
+</script>
+</body>
+</html>

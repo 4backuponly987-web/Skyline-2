@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Flight model calibration</title>
+<style>body{background:#0d1013;color:#cfe;font:12px/1.6 ui-monospace,Consolas,monospace;padding:14px}
+pre{white-space:pre-wrap} .ok{color:#8f8} .bad{color:#f88}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three/three.module.js" } }</script>
+</head>
+<body><pre id="out">running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { Pilot, AERO, FLIGHT_STATE } from '../src/flight/pilot.js';
+import { DEG } from '../src/core/math.js';
+
+// Stub world: infinitely far ground, still air.
+const field = {
+  height: () => -100000,
+  normal: () => ({ x: 0, y: 1, z: 0 }),
+};
+const collision = { sweep: () => -1, clearance: () => 1e9 };
+const wind = { sample: (x, y, z, out) => { out.x = 0; out.y = 0; out.z = 0; return out; } };
+
+const DT = 1 / 90;
+function run(opts) {
+  const p = new Pilot(field, collision, wind);
+  p.reset(new THREE.Vector3(0, opts.alt ?? 2000, 0), new THREE.Vector3(0, opts.vy ?? -8, opts.vz ?? -45));
+  const input = Object.assign({ pitch: 0, roll: 0, yaw: 0, tuck: 0, track: 0, flare: 0 }, opts.input || {});
+  const n = Math.round((opts.seconds ?? 45) / DT);
+  const samples = [];
+  for (let i = 0; i < n; i++) {
+    if (opts.each) opts.each(p, i * DT, input);
+    p.step(DT, input);
+    if (i > n * 0.75) samples.push(p.telemetry());
+  }
+  const avg = (k) => samples.reduce((a, s) => a + s[k], 0) / samples.length;
+  return { p, glide: avg('glide'), speed: avg('speed'), kmh: avg('kmh'), vario: avg('vario'), alpha: avg('alpha'), g: avg('g') };
+}
+
+const lines = [];
+const chk = (label, value, lo, hi, unit = '') => {
+  const ok = value >= lo && value <= hi;
+  lines.push(`${ok ? '  OK ' : ' FAIL'}  ${label.padEnd(30)} ${value.toFixed(2)}${unit}  (want ${lo}-${hi})`);
+  return ok;
+};
+
+// 1. neutral glide
+const neutral = run({ seconds: 70 });
+lines.push(`neutral:  glide ${neutral.glide.toFixed(2)}  ${neutral.kmh.toFixed(0)} km/h  sink ${neutral.vario.toFixed(1)} m/s  aoa ${neutral.alpha.toFixed(1)}deg`);
+chk('neutral glide ratio', neutral.glide, 2.2, 2.9);
+chk('neutral speed km/h', neutral.kmh, 150, 210, '');
+
+// 2. tracking
+const track = run({ seconds: 70, input: { track: 1 } });
+lines.push(`tracking: glide ${track.glide.toFixed(2)}  ${track.kmh.toFixed(0)} km/h  sink ${track.vario.toFixed(1)} m/s  aoa ${track.alpha.toFixed(1)}deg`);
+chk('tracking glide ratio', track.glide, 2.8, 3.6);
+
+// 3. full tuck dive (push over first)
+const tuck = run({
+  seconds: 70, alt: 4000, vy: -20, vz: -45,
+  input: { tuck: 1 },
+  each: (p, t, inp) => { inp.pitch = t < 4 ? -0.85 : 0; },
+});
+lines.push(`tuck:     glide ${tuck.glide.toFixed(2)}  ${tuck.kmh.toFixed(0)} km/h  sink ${tuck.vario.toFixed(1)} m/s  aoa ${tuck.alpha.toFixed(1)}deg`);
+chk('tuck terminal km/h', tuck.kmh, 265, 330);
+
+// 4. flare: from steady glide, snap the wings open and measure the pull-up
+{
+  const p = new Pilot(field, collision, wind);
+  p.reset(new THREE.Vector3(0, 2000, 0), new THREE.Vector3(0, -8, -45));
+  const input = { pitch: 0, roll: 0, yaw: 0, tuck: 0, track: 0, flare: 0 };
+  for (let i = 0; i < 70 / DT; i++) p.step(DT, input);
+  const v0 = p.speed, y0 = p.pos.y;
+  let peak = y0, minY = y0;
+  input.flare = 1; input.pitch = 0.65;
+  for (let i = 0; i < 3.2 / DT; i++) {
+    p.step(DT, input);
+    if (p.pos.y > peak) peak = p.pos.y;
+    if (p.pos.y < minY) minY = p.pos.y;
+  }
+  const dv = v0 - p.speed;
+  lines.push(`flare:    speed ${v0.toFixed(1)} -> ${p.speed.toFixed(1)} m/s (-${dv.toFixed(1)}), height ${(peak - minY).toFixed(1)} m regained, peak g ${p.gForce.toFixed(2)}`);
+  chk('flare speed bled', dv, 10, 32, ' m/s');
+  chk('flare height regained', peak - minY, 6, 30, ' m');
+}
+
+// 5. stall -> tumble -> recovery
+{
+  const p = new Pilot(field, collision, wind);
+  p.reset(new THREE.Vector3(0, 3000, 0), new THREE.Vector3(0, -8, -46));
+  const input = { pitch: 1, roll: 0, yaw: 0, tuck: 0, track: 0, flare: 1 };
+  let tumbled = false, tAt = 0;
+  for (let i = 0; i < 12 / DT; i++) {
+    p.step(DT, input);
+    if (p.state === FLIGHT_STATE.TUMBLE && !tumbled) { tumbled = true; tAt = i * DT; }
+  }
+  input.pitch = 0; input.flare = 0; input.tuck = 1;
+  let recovered = false, rAt = 0;
+  for (let i = 0; i < 16 / DT; i++) {
+    p.step(DT, input);
+    if (tumbled && p.state === FLIGHT_STATE.FLYING && !recovered) { recovered = true; rAt = i * DT; }
+  }
+  lines.push(`stall:    entered tumble ${tumbled ? 'yes @' + tAt.toFixed(1) + 's' : 'NO'}, recovered ${recovered ? 'yes @' + rAt.toFixed(1) + 's' : 'NO'}  (max aoa ${(p.maxAlpha/DEG).toFixed(0)}deg, max sep ${(p.maxSep||0).toFixed(2)})`);
+  lines.push(`${tumbled && recovered ? '  OK ' : ' FAIL'}  stall is reachable and recoverable`);
+}
+
+// 6. control sign conventions
+{
+  const p = new Pilot(field, collision, wind);
+  p.reset(new THREE.Vector3(0, 2000, 0), new THREE.Vector3(0, -8, -45));
+  const input = { pitch: 1, roll: 0, yaw: 0, tuck: 0, track: 0, flare: 0 };
+  for (let i = 0; i < 0.5 / DT; i++) p.step(DT, input);
+  lines.push(`pitch +1 => nose ${(p.pitchAngle / DEG).toFixed(1)} deg  (want positive = nose up / pull up)`);
+
+  const p2 = new Pilot(field, collision, wind);
+  p2.reset(new THREE.Vector3(0, 2000, 0), new THREE.Vector3(0, -8, -45));
+  const i2 = { pitch: 0, roll: 1, yaw: 0, tuck: 0, track: 0, flare: 0 };
+  for (let i = 0; i < 0.45 / DT; i++) p2.step(DT, i2);
+  const bank = p2.bank / DEG;
+  const turnDir = p2.vel.x;
+  lines.push(`roll +1  => bank ${bank.toFixed(1)} deg, lateral drift x=${turnDir.toFixed(2)} (want bank>0 and turning right/+x)`);
+
+  const p3 = new Pilot(field, collision, wind);
+  p3.reset(new THREE.Vector3(0, 2000, 0), new THREE.Vector3(0, -8, -45));
+  const i3 = { pitch: 0, roll: 0, yaw: 1, tuck: 0, track: 0, flare: 0 };
+  for (let i = 0; i < 0.6 / DT; i++) p3.step(DT, i3);
+  lines.push(`yaw +1   => heading x-vel ${p3.vel.x.toFixed(2)} (want positive = yaw right)`);
+}
+
+// 7. sustained bank turn radius
+{
+  const p = new Pilot(field, collision, wind);
+  p.reset(new THREE.Vector3(0, 3000, 0), new THREE.Vector3(0, -8, -45));
+  const input = { pitch: 0.12, roll: 0, yaw: 0, tuck: 0, track: 0, flare: 0 };
+  for (let i = 0; i < 20 / DT; i++) p.step(DT, input);
+  input.roll = 0.75;
+  for (let i = 0; i < 2 / DT; i++) p.step(DT, input);
+  input.roll = 0;
+  const start = p.pos.clone();
+  let maxD = 0;
+  for (let i = 0; i < 10 / DT; i++) {
+    p.step(DT, input);
+    maxD = Math.max(maxD, Math.hypot(p.pos.x - start.x, p.pos.z - start.z));
+  }
+  lines.push(`turn:     bank ${(p.bank / DEG).toFixed(0)} deg, 10 s excursion ${maxD.toFixed(0)} m, speed ${(p.speed * 3.6).toFixed(0)} km/h`);
+}
+
+document.getElementById('out').innerHTML = lines.join('\n')
+  .replace(/^( FAIL.*)$/gm, '<span class="bad">$1</span>')
+  .replace(/^(  OK.*)$/gm, '<span class="ok">$1</span>');
+window.FLIGHT_RESULT = lines.join('\n');
+</script>
+</body>
+</html>

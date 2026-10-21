@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Terrain 3D de-risk</title>
+<style>
+  html,body { margin:0; height:100%; background:#05070a; overflow:hidden; }
+  canvas { display:block; }
+  #hud { position:fixed; left:8px; top:8px; font:11px/1.5 ui-monospace,Consolas,monospace;
+         color:#a8e6a8; text-shadow:0 1px 2px #000; white-space:pre; pointer-events:none; }
+  #load { position:fixed; inset:0; display:grid; place-items:center; color:#cfd6dd;
+          font:13px ui-monospace,monospace; background:#05070a; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="load">booting…</div>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from 'three';
+import { TerrainField, WORLD } from '../src/world/field.js';
+import { Sky, WEATHER } from '../src/render/sky.js';
+import { makeTerrainMaterial } from '../src/world/terrainMaterial.js';
+import { TerrainChunks } from '../src/world/chunks.js';
+
+const errors = [];
+window.addEventListener('error', (e) => errors.push(String(e.message)));
+window.addEventListener('unhandledrejection', (e) => errors.push('promise: ' + e.reason));
+
+const params = new URLSearchParams(location.search);
+const field = new TerrainField(params.get('seed') || 'skyline');
+const loadEl = document.getElementById('load');
+const hud = document.getElementById('hud');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 1.0, 22000);
+const sky = new Sky(scene);
+sky.resize(22000);
+
+let chunks = null;
+let material = null;
+const frustum = new THREE.Frustum();
+const mat4 = new THREE.Matrix4();
+
+// ---- bake -----------------------------------------------------------------
+const gen = field.bake();
+const t0 = performance.now();
+function pump() {
+  const s = performance.now();
+  let r;
+  while (performance.now() - s < 80) {
+    r = gen.next();
+    if (r.done || r.value.phase === 'done') break;
+  }
+  if (!r.done && r.value.phase !== 'done') {
+    loadEl.textContent = `${r.value.label} ${(r.value.progress * 100) | 0}%`;
+    setTimeout(pump, 0);
+    return;
+  }
+  bakeDone();
+}
+setTimeout(pump, 0);
+
+function bakeDone() {
+  loadEl.textContent = 'building chunks…';
+  material = makeTerrainMaterial(field, sky.uniforms, { shadowSteps: 20, rockOctaves: 4 });
+  chunks = new TerrainChunks(field, material, { splitK: 2.5 });
+  scene.add(chunks.group);
+  window.CHUNKS = chunks;
+  setTimeout(() => {
+    setCam(...(params.get('cam') ? params.get('cam').split(',').map(Number) : [-900, 2500, 900, 40, 60, 2300]));
+    loadEl.style.display = 'none';
+    window.VIEW_READY = true;
+    loop();
+  }, 0);
+}
+
+// ---- camera ---------------------------------------------------------------
+const camTarget = new THREE.Vector3();
+function setCam(x, y, z, tx, ty, tz) {
+  camera.position.set(x, y, z);
+  camTarget.set(tx, ty, tz);
+  camera.lookAt(camTarget);
+  camera.updateMatrixWorld();
+  if (chunks) {
+    mat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(mat4);
+    chunks.prime(camera.position, frustum);
+  }
+}
+
+let time = Number(params.get('tod') || 8.2);
+let bakeMs = 0;
+let frames = 0;
+let acc = 0;
+let last = performance.now();
+
+function frame() {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  acc += dt;
+  frames++;
+
+  sky.update(time, WEATHER[params.get('w') || 'clear'], camera.position);
+  sky.setCam(camera.position);
+  material.uniforms.uTime.value = now * 0.001;
+
+  camera.updateMatrixWorld();
+  mat4.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(mat4);
+  const tc = performance.now();
+  chunks.update(camera.position, camera.position, frustum, 6);
+  const chunkMs = performance.now() - tc;
+
+  renderer.render(scene, camera);
+
+  if (frames % 10 === 0) {
+    const info = renderer.info.render;
+    hud.textContent =
+      `cam ${camera.position.x.toFixed(0)} ${camera.position.y.toFixed(0)} ${camera.position.z.toFixed(0)}\n` +
+      `nodes ${chunks.stats.nodes}  tris ${(chunks.stats.tris / 1000).toFixed(0)}k  calls ${info.calls}\n` +
+      `chunk ${chunkMs.toFixed(1)}ms  fps ${(frames / acc).toFixed(0)}  err ${errors.length}`;
+    if (acc > 2) { acc = 0; frames = 0; }
+  }
+}
+
+function loop() {
+  frame();
+  requestAnimationFrame(loop);
+}
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+window.VIEW = {
+  setCam,
+  render(n = 1) { for (let i = 0; i < n; i++) frame(); return true; },
+  setTime(t) { time = t; },
+  errors,
+  field,
+  stats: () => ({ ...chunks.stats, errors: errors.slice() }),
+};
+</script>
+</body>
+</html>
